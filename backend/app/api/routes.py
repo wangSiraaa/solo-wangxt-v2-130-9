@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -28,9 +28,12 @@ from app.models.schema import (
     ComponentResult,
 )
 from app.services.snapshots import apply_optimistic_update, create_immutable_snapshot, ensure_single_generation
+from app.services.revisions import ApplyStrategy, apply_revisions, preview_revisions
 from app.workers.tasks import build_pipeline
 
 router = APIRouter(prefix="/api")
+
+MAX_REVISION_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
 def _get(db: Session, model, entity_id: int):
@@ -123,6 +126,44 @@ def patch_observation(observation_id: int, payload: OptimisticObservationPatch, 
     apply_optimistic_update(db, obs, changes, expected_version=payload.lock_version)
     db.commit()
     return {"id": obs.id, "lock_version": obs.lock_version}
+
+
+def _read_revision_upload(file: UploadFile) -> str:
+    raw = file.file.read(MAX_REVISION_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_REVISION_UPLOAD_BYTES:
+        raise HTTPException(400, f"revision file exceeds {MAX_REVISION_UPLOAD_BYTES} bytes")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "revision file must be UTF-8 CSV") from None
+
+
+@router.post("/projects/{project_id}/revisions/preview")
+def preview_revision_file(project_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Dry-run a field CSV: every row classified as applicable / version_conflict /
+    missing_record / duplicate_line / invalid_row. Nothing is written."""
+    _get(db, Project, project_id)
+    return preview_revisions(db, project_id, _read_revision_upload(file))
+
+
+@router.post("/projects/{project_id}/revisions/confirm")
+def confirm_revision_file(
+    project_id: int,
+    file: UploadFile = File(...),
+    strategy: str = Form(ApplyStrategy.ALL_OR_NOTHING.value),
+    actor: str = Form("surveyor"),
+    db: Session = Depends(get_db),
+):
+    """Apply a previewed CSV. Rows are re-validated against the live draft and
+    written through the audited optimistic-lock path; the receipt is per row."""
+    _get(db, Project, project_id)
+    try:
+        mode = ApplyStrategy(strategy)
+    except ValueError:
+        raise HTTPException(400, f"unknown strategy {strategy!r}; use all_or_nothing or per_row") from None
+    receipt = apply_revisions(db, project_id, _read_revision_upload(file), strategy=mode, actor=actor)
+    db.commit()
+    return receipt
 
 
 @router.patch("/datums/{datum_id}")

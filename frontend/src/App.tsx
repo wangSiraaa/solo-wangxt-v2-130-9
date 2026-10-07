@@ -4,6 +4,7 @@ import { api, type Job, type ResidualRow } from './lib/api';
 import { NetworkGraph } from './components/NetworkGraph';
 import { StageTracker } from './components/StageTracker';
 import { ResidualTable } from './components/ResidualTable';
+import { RevisionPanel } from './components/RevisionPanel';
 import './styles.css';
 
 export default function App() {
@@ -128,6 +129,8 @@ export default function App() {
           <ResidualTable rows={residuals} />
         </section>
       )}
+
+      <RevisionPanel projectId={projectId} onMessage={setMessage} />
     </main>
   );
 }

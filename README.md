@@ -96,6 +96,33 @@ curl -X PATCH http://localhost:8000/api/weight-rules/2 \
 
 版本冲突返回 HTTP 409，审计表 `audit_events` 保存前后值和版本递增链。
 
+## 测段修订 CSV（预览 / 确认）
+
+外业修订表先预览、再确认。CSV 以观测稳定 ID（`line_code`）定位测段，必须携带原锁版本：
+
+```csv
+line_code,lock_version,observed_delta_m,distance_m
+L-0001,3,12.3456,1250.5
+L-0002,1,-0.8234,980.0
+```
+
+```bash
+# 预览：逐行报告 可应用 / 版本冲突 / 缺失记录 / 重复行 / 无效行，不写库
+curl -X POST http://localhost:8000/api/projects/1/revisions/preview -F file=@revisions.csv
+
+# 确认：strategy=all_or_nothing（任一行不可应用则整单不写）
+#       strategy=per_row（可应用行写入，其余跳过并逐行回执）
+curl -X POST http://localhost:8000/api/projects/1/revisions/confirm \
+  -F file=@revisions.csv -F strategy=per_row -F actor=surveyor-07
+```
+
+语义：
+
+- 确认时对当前草稿**重新校验**（预览仅供参考），通过 `apply_optimistic_update` 写入：锁版本递增、前后值进入 `audit_events`，原观测不会被静默覆盖。
+- 同一文件重复确认不会重复改值：已应用行的 `lock_version` 已递增，再次确认被判为 `version_conflict` 并跳过。
+- 修订只写草稿观测和审计事件；旧快照/旧 Job 不变，新草稿需重新生成快照，旧任务完成后仍只可审计（`AUDITED_ONLY`）。
+- 回执为行级：`applied`（含 `lock_version_before/after`）、`version_conflict`（含当前版本）、`missing_record`、`duplicate_line`（同文件重复 `line_code`，首次出现生效）、`invalid_row`、`blocked_by_strategy`（全成功策略下被整单驳回的可应用行）。
+
 ## 任务流程
 
 ```bash
@@ -147,6 +174,7 @@ cd backend && pytest -q
 | 不连通子网 | 分量预检当天列出点/边/基准数；无基准分量 QR 诊断阻塞，不拼接、不虚构连接 |
 | 多基准矛盾 | 基准作为带权行；超过 3σ 的基准残差触发 `blocked_datum_contradiction` |
 | 求解途中修订权重 | 旧 Job 继续绑定旧快照；新草稿必须生成新快照；旧任务完成后仅 `AUDITED_ONLY` |
+| 外业 CSV 修订 | 预览逐行分类（可应用/版本冲突/缺失/重复/无效）；确认按全成功或逐行策略走审计乐观锁；重复确认不重复改值 |
 | Worker 重启 | stage `confirmed_at` 作为恢复点；orchestrator 跳过已确认阶段 |
 | 重复提交 | `uq_job_generation` 保证项目+快照只有一个 Job 代次 |
 | 发布 | 核对闭合环、基准约束、改正数/残差统计、快照哈希、算法参数和 `regularization=none` |

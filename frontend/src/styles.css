@@ -33,5 +33,14 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .residual-table th, .residual-table td { border-bottom: 1px solid #e2e8f0; padding: 8px; text-align: right; }
 .residual-table th:first-child, .residual-table td:first-child { text-align: left; }
 .residual-bad { color: #dc2626; font-weight: 700; }
+select { padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; }
+.revision-hint { color: #475569; font-size: 13px; margin-top: 0; }
+.revision-table td, .revision-table th { text-align: left; }
+.revision-detail { color: #64748b; font-size: 12px; }
+.revision-applicable td { background: #f0fdf4; }
+.revision-applied td { background: #dcfce7; }
+.revision-version_conflict td, .revision-invalid_row td { background: #fee2e2; }
+.revision-missing_record td, .revision-duplicate_line td { background: #fef3c7; }
+.revision-blocked_by_strategy td { background: #e2e8f0; }
 
 @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }

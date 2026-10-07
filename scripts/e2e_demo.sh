@@ -39,3 +39,33 @@ for _ in $(seq 1 30); do
 done
 curl -fsS "$BASE/api/jobs/$job_id" | python3 -m json.tool
 curl -fsS "$BASE/api/jobs/$job_id/residuals?limit=20" | python3 -m json.tool
+
+echo "--- 测段修订 CSV 验收 ---"
+# 一条旧版本行（L1 声明 lock_version=99，草稿实际为 1）+ 一条合法修订行（L2）
+cat > /tmp/revisions.csv <<'CSV'
+line_code,lock_version,observed_delta_m,distance_m
+L1,99,1.0015,1000
+L2,1,1.0008,1000
+CSV
+
+echo "# 预览：L1 版本冲突，L2 可应用"
+curl -fsS -X POST "$BASE/api/projects/$project_id/revisions/preview" \
+  -F file=@/tmp/revisions.csv | python3 -m json.tool
+
+echo "# 逐行确认：L2 应用（锁版本 1→2，写入审计），L1 跳过"
+curl -fsS -X POST "$BASE/api/projects/$project_id/revisions/confirm" \
+  -F file=@/tmp/revisions.csv -F strategy=per_row | python3 -m json.tool
+
+echo "# 同文件重复确认：applied_count=0，不重复改值"
+curl -fsS -X POST "$BASE/api/projects/$project_id/revisions/confirm" \
+  -F file=@/tmp/revisions.csv -F strategy=per_row | python3 -m json.tool
+
+echo "# 修订后的草稿生成新快照/新任务代次"
+new_job=$(curl -fsS -X POST "$BASE/api/projects/$project_id/jobs")
+echo "$new_job"
+
+echo "# 旧 Job 仍只可审计：发布旧代次被拒（HTTP 409）"
+http_code=$(curl -s -o /tmp/publish_old.json -w '%{http_code}' -X POST "$BASE/api/jobs/$job_id/publish" \
+  -H 'Content-Type: application/json' -d '{"confirm":true}')
+echo "publish old job -> HTTP $http_code"
+cat /tmp/publish_old.json
