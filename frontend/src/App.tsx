@@ -4,6 +4,7 @@ import { api, type Job, type ResidualRow } from './lib/api';
 import { NetworkGraph } from './components/NetworkGraph';
 import { StageTracker } from './components/StageTracker';
 import { ResidualTable } from './components/ResidualTable';
+import { RevisionPanel } from './components/RevisionPanel';
 import './styles.css';
 
 export default function App() {
@@ -12,12 +13,17 @@ export default function App() {
   const [job, setJob] = useState<Job | null>(null);
   const [residuals, setResiduals] = useState<ResidualRow[]>([]);
   const [message, setMessage] = useState('');
+  const [revisionEpoch, setRevisionEpoch] = useState(0);
 
-  useEffect(() => {
+  function refreshTopology() {
     api<{ nodes: unknown[]; edges: unknown[] }>(`/api/projects/${projectId}/topology`)
       .then((data) => setElements([...(data.nodes as ElementDefinition[]), ...(data.edges as ElementDefinition[])]))
       .catch((error) => setMessage(error.message));
-  }, [projectId]);
+  }
+
+  useEffect(() => {
+    refreshTopology();
+  }, [projectId, revisionEpoch]);
 
   useEffect(() => {
     if (!job || ['completed', 'failed'].includes(job.status)) return;
@@ -90,6 +96,8 @@ export default function App() {
       </section>
 
       {message && <div className="message">{message}</div>}
+
+      <RevisionPanel projectId={projectId} onApplied={() => setRevisionEpoch((n) => n + 1)} />
 
       <section className="grid">
         <div className="card">

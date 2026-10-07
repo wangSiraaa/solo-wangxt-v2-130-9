@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -26,6 +26,12 @@ from app.models.schema import (
     WeightRule,
     ObservationResult,
     ComponentResult,
+)
+from app.services.revisions import (
+    RevisionSheetError,
+    RevisionStrategy,
+    confirm_observation_revisions,
+    preview_observation_revisions,
 )
 from app.services.snapshots import apply_optimistic_update, create_immutable_snapshot, ensure_single_generation
 from app.workers.tasks import build_pipeline
@@ -123,6 +129,64 @@ def patch_observation(observation_id: int, payload: OptimisticObservationPatch, 
     apply_optimistic_update(db, obs, changes, expected_version=payload.lock_version)
     db.commit()
     return {"id": obs.id, "lock_version": obs.lock_version}
+
+
+async def _read_sheet(file: UploadFile) -> bytes:
+    content = await file.read()
+    if not content.strip():
+        raise HTTPException(400, "上传文件为空")
+    return content
+
+
+@router.post("/projects/{project_id}/observations/revisions/preview")
+async def preview_observation_revision_csv(
+    project_id: int, file: UploadFile = File(..., description="修订 CSV：line_code, lock_version, observed_delta_m, distance_m"), db: Session = Depends(get_db)
+):
+    """Validate a field revision sheet without changing any draft observation."""
+    _get(db, Project, project_id)
+    content = await _read_sheet(file)
+    try:
+        return preview_observation_revisions(db, project_id, content)
+    except RevisionSheetError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.post("/projects/{project_id}/observations/revisions/confirm")
+async def confirm_observation_revision_csv(
+    project_id: int,
+    strategy: RevisionStrategy = Form(RevisionStrategy.ALL_OR_NOTHING),
+    actor: str = Form("surveyor"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Apply a previewed sheet.
+
+    all_or_nothing (default): the batch applies only if every row is applicable
+    or already applied; otherwise nothing is written.
+    per_row: each applicable row is updated independently with a row-level receipt.
+    """
+    _get(db, Project, project_id)
+    content = await _read_sheet(file)
+    try:
+        if strategy == RevisionStrategy.ALL_OR_NOTHING:
+            result = confirm_observation_revisions(
+                db, project_id, content, strategy=RevisionStrategy.ALL_OR_NOTHING, actor=actor
+            )
+            if not result["applied"] and result["applied_rows"] == 0 and result["blocking_rows"]:
+                db.rollback()
+                raise HTTPException(
+                    409,
+                    detail={"error": "revision_batch_blocked", **result},
+                )
+        else:
+            result = confirm_observation_revisions(
+                db, project_id, content, strategy=RevisionStrategy.PER_ROW, actor=actor
+            )
+        db.commit()
+    except RevisionSheetError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from None
+    return result
 
 
 @router.patch("/datums/{datum_id}")

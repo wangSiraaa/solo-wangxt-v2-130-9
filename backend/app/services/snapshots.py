@@ -12,6 +12,7 @@ from app.models.schema import (
     AuditEvent,
     Datum,
     Job,
+    JobStage,
     Observation,
     Point,
     Project,
@@ -44,7 +45,29 @@ def apply_optimistic_update(
     expected_version: int,
     actor: str = "surveyor",
     job_id: int | None = None,
+    action: str = "update",
 ) -> T:
+    return apply_optimistic_update_with_audit(
+        db,
+        instance,
+        changes,
+        expected_version=expected_version,
+        actor=actor,
+        job_id=job_id,
+        action=action,
+    )[0]
+
+
+def apply_optimistic_update_with_audit(
+    db: Session,
+    instance: T,
+    changes: dict[str, Any],
+    *,
+    expected_version: int,
+    actor: str = "surveyor",
+    job_id: int | None = None,
+    action: str = "update",
+) -> tuple[T, AuditEvent]:
     before = {column.name: getattr(instance, column.name) for column in instance.__table__.columns}
     actual = int(before["lock_version"])
     if actual != expected_version:
@@ -56,22 +79,21 @@ def apply_optimistic_update(
     instance.lock_version = actual + 1
     db.flush()
     after = {column.name: getattr(instance, column.name) for column in instance.__table__.columns}
-    db.add(
-        AuditEvent(
-            entity_type=instance.__class__.__name__.lower(),
-            entity_id=getattr(instance, "id"),
-            action="update",
-            expected_version=expected_version,
-            lock_version_in=actual,
-            lock_version_out=actual + 1,
-            actor=actor,
-            job_id=job_id,
-            before=_jsonable(before),
-            after=_jsonable(after),
-        )
+    audit = AuditEvent(
+        entity_type=instance.__class__.__name__.lower(),
+        entity_id=getattr(instance, "id"),
+        action=action,
+        expected_version=expected_version,
+        lock_version_in=actual,
+        lock_version_out=actual + 1,
+        actor=actor,
+        job_id=job_id,
+        before=_jsonable(before),
+        after=_jsonable(after),
     )
-    return instance
-
+    db.add(audit)
+    db.flush()
+    return instance, audit
 
 def _jsonable(value: Any) -> Any:
     from decimal import Decimal
@@ -80,6 +102,10 @@ def _jsonable(value: Any) -> Any:
         return float(value)
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
     return value
 
 

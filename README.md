@@ -96,6 +96,45 @@ curl -X PATCH http://localhost:8000/api/weight-rules/2 \
 
 版本冲突返回 HTTP 409，审计表 `audit_events` 保存前后值和版本递增链。
 
+## 外业 CSV 修订：先预览，后确认
+
+外业送来的测段修订表必须先逐行预览，再批量确认，原观测不会被静默覆盖。CSV 必需列（支持中英文表头）：
+
+```csv
+line_code,lock_version,observed_delta_m,distance_m
+测段编号,原锁版本,高差,长度
+```
+
+- `line_code`：观测稳定 ID（不是会变化的数据库主键）
+- `lock_version`：测量员拿到该行时的**原锁版本**
+- `observed_delta_m` / `distance_m`：修订后的高差与长度
+
+预览（只读，不改任何值）按行报告 `applicable` / `already_applied` / `version_conflict` / `missing_record` / `duplicate_row` / `invalid_row`：
+
+```bash
+curl -X POST http://localhost:8000/api/projects/1/observations/revisions/preview \
+  -F 'file=@scripts/example_observation_revisions.csv'
+```
+
+确认支持两种明确策略，每行都返回行级回执（含 `new_lock_version` 与 `audit_event_id`）：
+
+```bash
+# 全成功（默认）：任一行版本冲突/缺失/重复/非法则整批不应用，返回 409
+curl -X POST http://localhost:8000/api/projects/1/observations/revisions/confirm \
+  -F 'strategy=all_or_nothing' -F 'file=@scripts/example_observation_revisions.csv'
+
+# 逐行结果：合法行走乐观锁+审计，冲突/缺失/重复/非法行回报但不影响其他行
+curl -X POST http://localhost:8000/api/projects/1/observations/revisions/confirm \
+  -F 'strategy=per_row' -F 'file=@scripts/example_observation_revisions.csv'
+```
+
+语义保证：
+
+- 所有应用都走既有 `apply_optimistic_update` 乐观锁/审计链（`action=csv_revision`），`audit_events` 约束 `lock_version_out = lock_version_in + 1`。
+- **重复确认幂等**：修订值与当前草稿一致的行报 `already_applied`，不二次改值、不产生新审计事件。
+- 同一 `line_code` 在文件内重复出现时整行标记 `duplicate_row`，永不隐式选一行应用。
+- 修订只改 `observations` 草稿；旧 `snapshots` 负载与 SHA-256 不变，旧 Job 完成后仍只能 `AUDITED_ONLY`，发布时被 `stale generation` 拒绝。新草稿重新 `/jobs` 生成新快照版本（`v1 -> v2`），未变化的重复提交仍去重。
+
 ## 任务流程
 
 ```bash
@@ -149,6 +188,7 @@ cd backend && pytest -q
 | 求解途中修订权重 | 旧 Job 继续绑定旧快照；新草稿必须生成新快照；旧任务完成后仅 `AUDITED_ONLY` |
 | Worker 重启 | stage `confirmed_at` 作为恢复点；orchestrator 跳过已确认阶段 |
 | 重复提交 | `uq_job_generation` 保证项目+快照只有一个 Job 代次 |
+| 外业 CSV 批量修订 | 先预览逐行分类（可应用/版本冲突/缺失/重复/非法），确认走全成功或逐行策略；乐观锁+行级审计回执；重复确认幂等；旧快照/旧 Job 不变 |
 | 发布 | 核对闭合环、基准约束、改正数/残差统计、快照哈希、算法参数和 `regularization=none` |
 
 ## 目录
